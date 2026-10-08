@@ -84,7 +84,7 @@ req = urllib.request.Request("https://ai.zonheng.net/v1/responses",
              "Content-Type": "application/json",
              "User-Agent": "curl/8.7.1"})
 try:
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with urllib.request.urlopen(req, timeout=90) as r:
         body = json.load(r)
     texts = []
     for item in body.get("output", []):
@@ -167,13 +167,13 @@ while IFS='|' read -r name path branch group; do
       AI_ERR="$CONFIG_DIR/.ai_err.tmp"
       AI_TEXT=""
       CONTEXT=$(ai_context "$name" "$group")
-      for attempt in 1 2; do
+      for attempt in 1 2 3; do
         if AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$LOGTXT" "$DIFF" "$CONTEXT" 2>"$AI_ERR"); then
           break
         fi
         log "AI分析失败(第${attempt}次): $name/$branch: $(tail -c 200 "$AI_ERR" 2>/dev/null)"
         AI_TEXT=""
-        [ $attempt -eq 1 ] && sleep 3
+        [ $attempt -lt 3 ] && sleep 5
       done
       rm -f "$AI_ERR"
     else
