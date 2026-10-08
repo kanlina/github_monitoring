@@ -31,12 +31,31 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 
-ai_analyze() {  # $1=仓库名 $2=分支 $3=commit列表文本 $4=diff文本  → stdout 摘要，失败返回非0
+ai_context() {  # $1=当前仓库名 → 输出其他关联项目近期提交动态
+  local cur="$1" seen=""
+  local n p b
+  while IFS='|' read -r n p b; do
+    case "$n" in ''|\#*) continue ;; esac
+    [ "$n" = "$cur" ] && continue
+    case " $seen " in *" $n "*) continue ;; esac
+    seen="$seen $n"
+    local line
+    line=$(git -C "$p" log "origin/$b" -8 --date=format:'%m-%d %H:%M' \
+      --format='%ad %s' 2>/dev/null | head -8)
+    [ -z "$line" ] && continue
+    echo "【$n 最近提交（@$b）】"
+    echo "$line"
+    echo ""
+  done < "$REPOS_FILE"
+}
+
+ai_analyze() {  # $1=仓库名 $2=分支 $3=commit列表 $4=diff $5=关联项目近期提交  → stdout 摘要
   [ -z "$AI_TOKEN" ] && return 1
   python3 - "$@" <<'PY'
 import json, sys, urllib.request
-name, branch, logtxt, diff = sys.argv[1:5]
+name, branch, logtxt, diff, ctx = sys.argv[1:6]
 diff = diff[:8000]
+ctx = ctx[:3000]
 prompt = f"""仓库 {name} 的 {branch} 分支有新提交。
 
 提交记录:
@@ -47,10 +66,13 @@ prompt = f"""仓库 {name} 的 {branch} 分支有新提交。
 {diff}
 ```
 
+同一产品的关联项目近期提交动态（供参考，用于识别跨端配合/依赖关系）:
+{ctx or "（无）"}
+
 请按 instructions 中的格式输出分析，不要输出其他内容。"""
 data = {
     "model": "gpt-5.5",
-    "instructions": "你是资深工程师兼产品顾问。输入包含按提交拆分的变更说明和 diff。用简体中文做分析，400 字以内，按以下三段输出（段落标题用【】，不要使用 markdown 标题）:\n【技术实现】逐条提交说明：每条提交一行，直接讲技术实现——改动的关键类/组件/接口/字段/配置项，以及逻辑如何变化，不写产品目的\n【对用户的影响】普通用户会感知到什么变化？哪些操作流程会不一样？对业务指标（如注册转化、放款、还款）可能有什么影响\n【风险与建议】技术风险（如边界条件、兼容性、数据一致性）+ 建议重点回归的具体场景",
+    "instructions": "你是资深工程师兼产品顾问。输入包含按提交拆分的变更说明、diff，以及同一产品其他端项目的近期提交动态。用简体中文做分析，450 字以内，按以下三段输出（段落标题用【】，不要使用 markdown 标题）:\n【技术实现】逐条提交说明：每条提交一行，直接讲技术实现——改动的关键类/组件/接口/字段/配置项，以及逻辑如何变化，不写产品目的\n【对用户的影响】普通用户会感知到什么变化？哪些操作流程会不一样？对业务指标（如注册转化、放款、还款）可能有什么影响\n【风险与建议】技术风险（如边界条件、兼容性、数据一致性）+ 建议重点回归的具体场景。若本批提交与关联项目近期提交是同一需求的跨端配合（如客户端与后端联动改造），请明确指出配合关系及上线顺序依赖（哪端先上/需同时上）",
     "input": prompt,
     "max_output_tokens": 1600,
 }
@@ -142,8 +164,9 @@ while IFS='|' read -r name path branch; do
     if [ -n "$AI_TOKEN" ]; then
       AI_ERR="$CONFIG_DIR/.ai_err.tmp"
       AI_TEXT=""
+      CONTEXT=$(ai_context "$name")
       for attempt in 1 2; do
-        if AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$LOGTXT" "$DIFF" 2>"$AI_ERR"); then
+        if AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$LOGTXT" "$DIFF" "$CONTEXT" 2>"$AI_ERR"); then
           break
         fi
         log "AI分析失败(第${attempt}次): $name/$branch: $(tail -c 200 "$AI_ERR" 2>/dev/null)"
