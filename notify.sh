@@ -17,17 +17,18 @@ WEBHOOK=$(head -n1 "$WEBHOOK_FILE" 2>/dev/null | tr -d '[:space:]')
 AI_TOKEN=$(head -n1 "$AI_KEY_FILE" 2>/dev/null | tr -d '[:space:]')
 mkdir -p "$STATE_DIR"
 
-# 并发保护：同一时刻只允许一个实例（launchd 周期触发可能重叠）
+# 并发保护：同一时刻只允许一个实例（定时器周期触发可能重叠）
 LOCK_DIR="$CONFIG_DIR/.lock"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  # 锁超过 5 分钟视为残留，强制接管
-  if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
-  else
+  # 已有锁：检查持锁进程是否还活着，活着就让路，死了就接管
+  LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
     exit 0
   fi
+  rmdir "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+echo $$ > "$LOCK_DIR/pid"
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 
@@ -140,10 +141,9 @@ PY
 while IFS='|' read -r name path branch group; do
   case "$name" in ''|\#*) continue ;; esac
   group="${group:-kec}"
-  if ! NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null); then
-    git -C "$path" fetch origin "$branch" --quiet 2>>"$LOG_FILE" || { log "fetch失败: $name"; continue; }
-    NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null) || { log "rev-parse失败: $name/$branch"; continue; }
-  fi
+  # 必须每轮无条件 fetch：本地缓存的 origin 引用是过期的，不能作为对比依据
+  git -C "$path" fetch origin "$branch" --quiet 2>>"$LOG_FILE" || { log "fetch失败: $name/$branch"; continue; }
+  NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null) || { log "rev-parse失败: $name/$branch"; continue; }
   STATE_FILE="$STATE_DIR/$name.$branch.sha"
   OLD_SHA=$(cat "$STATE_FILE" 2>/dev/null)
   if [ -n "$OLD_SHA" ] && [ "$OLD_SHA" != "$NEW_SHA" ]; then
