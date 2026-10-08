@@ -1,0 +1,10 @@
+[Unit]
+Description=git-notify: poll GitHub repos and notify Feishu group
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/git-notify/notify.sh
+# 防止上一轮还没跑完就叠加执行
+TimeoutStartSec=10min

@@ -1,0 +1,6 @@
+# 每行: 名称|仓库本地路径|要监听的分支（# 开头为注释）
+# 示例：把下面的路径替换成你服务器/本机上的实际克隆路径
+pk-native-app|/Users/yourname/code/pk-native-app|main
+pk-native-app|/Users/yourname/code/pk-native-app|test
+pk-native-h5|/Users/yourname/code/pk-native-h5|main
+pk-native-backend|/Users/yourname/code/pk-native-backend|main
