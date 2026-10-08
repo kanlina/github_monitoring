@@ -1,8 +1,4 @@
-# 每行: 名称|仓库本地路径|要监听的分支（# 开头为注释）
-# 示例：把下面的路径替换成你服务器/本机上的实际克隆路径
-pk-native-app|/Users/yourname/code/pk-native-app|main|kec
-pk-native-app|/Users/yourname/code/pk-native-app|test|kec
-pk-native-h5|/Users/yourname/code/pk-native-h5|main|kec
-pk-native-backend|/Users/yourname/code/pk-native-backend|main|kec
-pk-h5-cpi-backend(cpi-后端)|/path/to/pk-h5-cpi-backend|main|cpi
-pk-h5-cpi-frontend(cpi-前端)|/path/to/pk-h5-cpi-frontend|main|cpi
+# 每行: 显示名称|仓库本地路径|分支|分组(可选,默认kec)
+pk-native-app(kec-app)|/path/to/pk-native-app|main|kec
+pk-native-dashboard-backend(kec-管理后台后端)|/path/to/pk-native-dashboard-backend|main|kec
+pk-h5-cpi-frontend(cpi-前端)|/path/to/pk-h5-cpi-frontend|test|cpi
