@@ -31,12 +31,13 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 
-ai_context() {  # $1=当前仓库名 → 输出其他关联项目近期提交动态
-  local cur="$1" seen=""
-  local n p b
-  while IFS='|' read -r n p b; do
+ai_context() {  # $1=当前仓库名 $2=分组 → 输出同组其他项目近期提交动态
+  local cur="$1" grp="$2" seen=""
+  local n p b g
+  while IFS='|' read -r n p b g; do
     case "$n" in ''|\#*) continue ;; esac
     [ "$n" = "$cur" ] && continue
+    [ "${g:-kec}" = "$grp" ] || continue
     case " $seen " in *" $n "*) continue ;; esac
     seen="$seen $n"
     local line
@@ -136,8 +137,9 @@ sys.exit(0 if body.get("code") == 0 or body.get("StatusCode") == 0 else 1)
 PY
 }
 
-while IFS='|' read -r name path branch; do
+while IFS='|' read -r name path branch group; do
   case "$name" in ''|\#*) continue ;; esac
+  group="${group:-kec}"
   if ! NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null); then
     git -C "$path" fetch origin "$branch" --quiet 2>>"$LOG_FILE" || { log "fetch失败: $name"; continue; }
     NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null) || { log "rev-parse失败: $name/$branch"; continue; }
@@ -164,7 +166,7 @@ while IFS='|' read -r name path branch; do
     if [ -n "$AI_TOKEN" ]; then
       AI_ERR="$CONFIG_DIR/.ai_err.tmp"
       AI_TEXT=""
-      CONTEXT=$(ai_context "$name")
+      CONTEXT=$(ai_context "$name" "$group")
       for attempt in 1 2; do
         if AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$LOGTXT" "$DIFF" "$CONTEXT" 2>"$AI_ERR"); then
           break
