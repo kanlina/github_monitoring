@@ -105,13 +105,13 @@ except Exception as e:
 PY
 }
 
-notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本(可空) $7=webhook
+notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本 $7=webhook $8=标题颜色
   python3 - "$@" <<'PY'
 import json, sys, urllib.request
 from datetime import datetime
-name, branch, count, logtxt, repo_url, ai_text, webhook = sys.argv[1:8]
+name, branch, count, logtxt, repo_url, ai_text, webhook, color = sys.argv[1:9]
 
-header = {"template": "green", "title": {"tag": "plain_text",
+header = {"template": color, "title": {"tag": "plain_text",
           "content": f"🚀 commit 通知 | {name} @ {branch}"}}
 elements = [
     {"tag": "div", "text": {"tag": "lark_md",
@@ -179,7 +179,18 @@ while IFS='|' read -r name path branch group; do
     else
       AI_TEXT=""
     fi
-    if notify "$name" "$branch" "$COUNT" "$LOGTXT" "$REPO_URL" "$AI_TEXT" "$WEBHOOK"; then
+    # 按分组+分支区分卡片颜色
+    case "$group:$branch" in
+      kec:main)   COLOR=green;;
+      kec:test)   COLOR=blue;;
+      cpi:main)   COLOR=turquoise;;
+      cpi:test)   COLOR=purple;;
+      h5:main)    COLOR=indigo;;
+      h5:test)    COLOR=orange;;
+      *:main)     COLOR=green;;
+      *)          COLOR=blue;;
+    esac
+    if notify "$name" "$branch" "$COUNT" "$LOGTXT" "$REPO_URL" "$AI_TEXT" "$WEBHOOK" "$COLOR"; then
       log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
       echo "$NEW_SHA" > "$STATE_FILE"
     else
