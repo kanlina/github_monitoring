@@ -57,7 +57,8 @@ cd github_monitoring
 1. 服务器上克隆本仓库 + 业务仓库
 2. `./install/setup.sh`，选 systemd 路径；SSH 断开后仍要运行需执行 `loginctl enable-linger $USER`
 3. 业务仓库用 Deploy Key（只读）授权
-4. cron 代替方案：`* * * * * $HOME/.config/git-notify/notify.sh`
+4. cron 代替方案（推荐用 flock 防重叠，内核级锁无残留问题）：
+   `* * * * * /usr/bin/flock -n $HOME/.config/git-notify/.cron.lock $HOME/.config/git-notify/notify.sh`
 
 ## 常用运维
 
