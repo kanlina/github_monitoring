@@ -17,18 +17,10 @@ WEBHOOK=$(head -n1 "$WEBHOOK_FILE" 2>/dev/null | tr -d '[:space:]')
 AI_TOKEN=$(head -n1 "$AI_KEY_FILE" 2>/dev/null | tr -d '[:space:]')
 mkdir -p "$STATE_DIR"
 
-# 并发保护：同一时刻只允许一个实例（定时器周期触发可能重叠）
-LOCK_DIR="$CONFIG_DIR/.lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  # 已有锁：检查持锁进程是否还活着，活着就让路，死了就接管
-  LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null)
-  if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
-    exit 0
-  fi
-  rm -rf "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
-fi
-echo $$ > "$LOCK_DIR/pid"
-trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
+# 并发保护说明：本脚本自身不做锁，由 cron 命令行的 flock（内核级文件锁）保证
+# 单实例——进程无论以何种方式结束（正常/被杀/断电），内核都会自动释放锁，
+# 不存在残留锁问题。macOS 无 flock 时如需本地运行，自行加 mkdir 锁或忽略重叠。
+# cron 示例: * * * * * root /usr/bin/flock -n /root/.config/git-notify/.cron.lock /root/.config/git-notify/notify.sh
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 log "心跳: 本轮开始 (pid=$$)"
