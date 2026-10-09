@@ -25,10 +25,10 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   if [ -n "$LOCK_PID" ] && kill -0 "$LOCK_PID" 2>/dev/null; then
     exit 0
   fi
-  rmdir "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+  rm -rf "$LOCK_DIR" 2>/dev/null; mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
 echo $$ > "$LOCK_DIR/pid"
-trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
+trap 'rm -rf "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 log "心跳: 本轮开始 (pid=$$)"
