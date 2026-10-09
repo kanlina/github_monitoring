@@ -1,4 +1,6 @@
 # 每行: 显示名称|仓库本地路径|分支|分组(可选,默认kec)
-pk-native-app(kec-app)|/path/to/pk-native-app|main|kec
-pk-h5-api-backend(h5全流程-后端)|/path/to/pk-h5-api-backend|main|h5
+# 分支列写 * = 动态监听所有远端分支（新建自动纳入/删除自动清理/忽略 dependabot）
+# 也可写具体分支名只监听单分支
+pk-native-app(kec-app)|/path/to/pk-native-app|*|kec
+pk-h5-api-backend(h5全流程-后端)|/path/to/pk-h5-api-backend|*|h5
 pk-h5-cpi-frontend(cpi-前端)|/path/to/pk-h5-cpi-frontend|test|cpi
