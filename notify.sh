@@ -201,3 +201,4 @@ while IFS='|' read -r name path branch group; do
     [ -z "$OLD_SHA" ] && { echo "$NEW_SHA" > "$STATE_FILE"; log "基线: $name/$branch = ${NEW_SHA:0:8}"; }
   fi
 done < "$REPOS_FILE"
+exit 0
