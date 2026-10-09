@@ -1,9 +1,13 @@
 #!/bin/bash
 # git-notify: 本地轮询 GitHub 仓库，有新提交则推飞书群（交互卡片 + AI 变更分析）
-# 配置: ~/.config/git-notify/repos.conf   每行: 名称|仓库本地路径|分支
+# 配置: ~/.config/git-notify/repos.conf
+#       每行: 名称|仓库本地路径|分支|分组(可选,默认kec)
+#       分支列写 * 表示动态监听该仓库的所有远端分支（新建分支自动纳入、删除分支自动清理，
+#       自动忽略 dependabot/* 机器人分支）
 #       ~/.config/git-notify/webhook.txt  飞书自定义机器人 webhook 地址
 #       ~/.config/git-notify/ai_key.txt   AI 中转服务 token
-# 状态: ~/.config/git-notify/state/
+# 状态: ~/.config/git-notify/state/   （分支名中的 / 会替换为 __ 存储）
+# 并发保护: 由 cron 层 flock 完成（见 README），本脚本自身不加锁
 
 CONFIG_DIR="$HOME/.config/git-notify"
 REPOS_FILE="$CONFIG_DIR/repos.conf"
@@ -12,18 +16,15 @@ AI_KEY_FILE="$CONFIG_DIR/ai_key.txt"
 STATE_DIR="$CONFIG_DIR/state"
 LOG_FILE="$CONFIG_DIR/notify.log"
 
+# 动态模式下忽略的分支（正则）
+IGNORE_BRANCH_RE='^dependabot/'
+
 WEBHOOK=$(head -n1 "$WEBHOOK_FILE" 2>/dev/null | tr -d '[:space:]')
 [ -z "$WEBHOOK" ] && exit 0
 AI_TOKEN=$(head -n1 "$AI_KEY_FILE" 2>/dev/null | tr -d '[:space:]')
 mkdir -p "$STATE_DIR"
 
-# 并发保护说明：本脚本自身不做锁，由 cron 命令行的 flock（内核级文件锁）保证
-# 单实例——进程无论以何种方式结束（正常/被杀/断电），内核都会自动释放锁，
-# 不存在残留锁问题。macOS 无 flock 时如需本地运行，自行加 mkdir 锁或忽略重叠。
-# cron 示例: * * * * * root /usr/bin/flock -n /root/.config/git-notify/.cron.lock /root/.config/git-notify/notify.sh
-
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
-log "心跳: 本轮开始 (pid=$$)"
 
 ai_context() {  # $1=当前仓库名 $2=分组 → 输出同组其他项目近期提交动态
   local cur="$1" grp="$2" seen=""
@@ -131,15 +132,28 @@ sys.exit(0 if body.get("code") == 0 or body.get("StatusCode") == 0 else 1)
 PY
 }
 
-while IFS='|' read -r name path branch group; do
-  case "$name" in ''|\#*) continue ;; esac
-  group="${group:-kec}"
-  # 必须每轮无条件 fetch：本地缓存的 origin 引用是过期的，不能作为对比依据
-  git -C "$path" fetch origin "$branch" --quiet 2>>"$LOG_FILE" || { log "fetch失败: $name/$branch"; continue; }
-  NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null) || { log "rev-parse失败: $name/$branch"; continue; }
-  STATE_FILE="$STATE_DIR/$name.$branch.sha"
+color_for() {  # $1=分组 $2=分支 → 飞书卡片标题颜色
+  local grp="$1" b="$2"
+  case "$b" in
+    main|master)
+      case "$grp" in cpi) echo turquoise ;; h5) echo indigo ;; *) echo green ;; esac ;;
+    test)
+      case "$grp" in cpi) echo purple ;; h5) echo orange ;; *) echo blue ;; esac ;;
+    develop|dev|v2)
+      echo violet ;;
+    *)
+      echo yellow ;;
+  esac
+}
+
+process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已 fetch，origin/$3 为最新）
+  local name="$1" path="$2" branch="$3" group="$4"
+  local NEW_SHA OLD_SHA STATE_FILE
+  NEW_SHA=$(git -C "$path" rev-parse "origin/$branch" 2>/dev/null) || return 0
+  STATE_FILE="$STATE_DIR/$name.${branch//\//__}.sha"
   OLD_SHA=$(cat "$STATE_FILE" 2>/dev/null)
   if [ -n "$OLD_SHA" ] && [ "$OLD_SHA" != "$NEW_SHA" ]; then
+    local COUNT REPO_URL LOGTXT DIFF AI_TEXT AI_ERR CONTEXT attempt
     COUNT=$(git -C "$path" rev-list --count "$OLD_SHA..$NEW_SHA" 2>/dev/null || echo "?")
     REPO_URL=$(git -C "$path" remote get-url origin 2>/dev/null \
       | sed -e 's#git@github.com:#https://github.com/#' -e 's#\.git$##')
@@ -148,6 +162,7 @@ while IFS='|' read -r name path branch group; do
       "$OLD_SHA..$NEW_SHA" 2>/dev/null | head -20)
     # 按提交拆分 diff，便于 AI 逐条归因
     DIFF=""
+    local csha CSUBJ
     while read -r csha; do
       [ -z "$csha" ] && continue
       CSUBJ=$(git -C "$path" log -1 --format='%s' "$csha" 2>/dev/null)
@@ -172,18 +187,7 @@ while IFS='|' read -r name path branch group; do
     else
       AI_TEXT=""
     fi
-    # 按分组+分支区分卡片颜色
-    case "$group:$branch" in
-      kec:main)   COLOR=green;;
-      kec:test)   COLOR=blue;;
-      cpi:main)   COLOR=turquoise;;
-      cpi:test)   COLOR=purple;;
-      h5:main)    COLOR=indigo;;
-      h5:test)    COLOR=orange;;
-      *:main)     COLOR=green;;
-      *)          COLOR=blue;;
-    esac
-    if notify "$name" "$branch" "$COUNT" "$LOGTXT" "$REPO_URL" "$AI_TEXT" "$WEBHOOK" "$COLOR"; then
+    if notify "$name" "$branch" "$COUNT" "$LOGTXT" "$REPO_URL" "$AI_TEXT" "$WEBHOOK" "$(color_for "$group" "$branch")"; then
       log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
       echo "$NEW_SHA" > "$STATE_FILE"
     else
@@ -192,5 +196,40 @@ while IFS='|' read -r name path branch group; do
   else
     [ -z "$OLD_SHA" ] && { echo "$NEW_SHA" > "$STATE_FILE"; log "基线: $name/$branch = ${NEW_SHA:0:8}"; }
   fi
+}
+
+process_repo() {  # $1=名称 $2=路径 $3=分支(*=动态全部) $4=分组
+  local name="$1" path="$2" branch="$3" group="$4"
+  if [ "$branch" != "*" ]; then
+    git -C "$path" fetch origin "$branch" --quiet 2>>"$LOG_FILE" \
+      || { log "fetch失败: $name/$branch"; return 0; }
+    process_branch "$name" "$path" "$branch" "$group"
+    return 0
+  fi
+  # 动态模式：拉取所有分支并清理失效引用
+  git -C "$path" fetch origin --prune --quiet 2>>"$LOG_FILE" \
+    || { log "fetch失败: $name/*"; return 0; }
+  local branches current b
+  branches=$(git -C "$path" for-each-ref refs/remotes/origin --format='%(refname:short)' 2>/dev/null \
+    | sed 's|^origin/||' | grep -v '^HEAD$' | grep -vE "$IGNORE_BRANCH_RE")
+  for b in $branches; do
+    process_branch "$name" "$path" "$b" "$group"
+  done
+  # 清理已删除分支的基线文件
+  local f fb
+  for f in "$STATE_DIR"/"$name".*.sha; do
+    [ -e "$f" ] || continue
+    fb="${f##*/}"; fb="${fb#"$name".}"; fb="${fb%.sha}"; fb="${fb//__/\/}"
+    if ! echo "$branches" | grep -qxF "$fb"; then
+      rm -f "$f"
+      log "分支已删除，清理基线: $name/$fb"
+    fi
+  done
+}
+
+while IFS='|' read -r name path branch group; do
+  case "$name" in ''|\#*) continue ;; esac
+  group="${group:-kec}"
+  process_repo "$name" "$path" "$branch" "$group"
 done < "$REPOS_FILE"
 exit 0
