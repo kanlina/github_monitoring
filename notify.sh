@@ -29,6 +29,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCK_DIR/pid"
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
+log "心跳: 本轮开始 (pid=$$)"
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
 
