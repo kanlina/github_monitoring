@@ -29,9 +29,9 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCK_DIR/pid"
 trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT HUP INT TERM
-log "心跳: 本轮开始 (pid=$$)"
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
+log "心跳: 本轮开始 (pid=$$)"
 
 ai_context() {  # $1=当前仓库名 $2=分组 → 输出同组其他项目近期提交动态
   local cur="$1" grp="$2" seen=""
