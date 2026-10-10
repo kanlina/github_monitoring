@@ -7,6 +7,7 @@
 #       ~/.config/git-notify/webhook.txt  飞书自定义机器人 webhook 地址
 #       ~/.config/git-notify/ai_key.txt   AI 中转服务 token
 # 状态: ~/.config/git-notify/state/   （分支名中的 / 会替换为 __ 存储）
+# AI 补发: AI 分析失败的提交进入 pending.list 队列，后续轮询自动重试并补发 AI 分析卡片
 # 并发保护: 由 cron 层 flock 完成（见 README），本脚本自身不加锁
 
 CONFIG_DIR="$HOME/.config/git-notify"
@@ -14,7 +15,11 @@ REPOS_FILE="$CONFIG_DIR/repos.conf"
 WEBHOOK_FILE="$CONFIG_DIR/webhook.txt"
 AI_KEY_FILE="$CONFIG_DIR/ai_key.txt"
 STATE_DIR="$CONFIG_DIR/state"
+PENDING_FILE="$CONFIG_DIR/pending.list"
 LOG_FILE="$CONFIG_DIR/notify.log"
+AI_MAX_ATTEMPTS=3
+AI_RETRY_SLEEP=5
+PENDING_MAX_AGE=86400   # 补发队列最长保留 24h
 
 # 动态模式下忽略的分支（正则）
 IGNORE_BRANCH_RE='^dependabot/'
@@ -25,6 +30,27 @@ AI_TOKEN=$(head -n1 "$AI_KEY_FILE" 2>/dev/null | tr -d '[:space:]')
 mkdir -p "$STATE_DIR"
 
 log() { echo "[$(date '+%F %T')] $1" >> "$LOG_FILE"; }
+log "心跳: 本轮开始 (pid=$$)"
+
+# 生成提交素材（通知与 AI 补发共用）→ 设置全局 G_LOGTXT / G_DIFF / G_COUNT / G_REPO_URL
+gen_materials() {  # $1=路径 $2=旧SHA $3=新SHA
+  local path="$1" old="$2" new="$3" csha CSUBJ
+  G_COUNT=$(git -C "$path" rev-list --count "$old..$new" 2>/dev/null || echo "?")
+  G_REPO_URL=$(git -C "$path" remote get-url origin 2>/dev/null \
+    | sed -e 's#git@github.com:#https://github.com/#' -e 's#\.git$##')
+  G_LOGTXT=$(git -C "$path" log --date=format:'%Y-%m-%d %H:%M' \
+    --format="- [%h](${G_REPO_URL}/commit/%H) %an · %ad: %s" \
+    "$old..$new" 2>/dev/null | head -20)
+  G_DIFF=""
+  while read -r csha; do
+    [ -z "$csha" ] && continue
+    CSUBJ=$(git -C "$path" log -1 --format='%s' "$csha" 2>/dev/null)
+    G_DIFF="${G_DIFF}--- 提交 ${csha:0:7}: ${CSUBJ}"$'\n'
+    G_DIFF="${G_DIFF}$(git -C "$path" show "$csha" --format="" 2>/dev/null \
+      | grep -vE '^(\+\+\+|---|index |diff --git )' | head -c 3000)"$'\n'
+  done < <(git -C "$path" rev-list --reverse "$old..$new" 2>/dev/null | head -10)
+  G_DIFF=$(printf '%s' "$G_DIFF" | head -c 8000)
+}
 
 ai_context() {  # $1=当前仓库名 $2=分组 → 输出同组其他项目近期提交动态
   local cur="$1" grp="$2" seen=""
@@ -99,14 +125,14 @@ except Exception as e:
 PY
 }
 
-notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本 $7=webhook $8=标题颜色
+notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本 $7=webhook $8=颜色 $9=标题前缀
   python3 - "$@" <<'PY'
 import json, sys, urllib.request
 from datetime import datetime
-name, branch, count, logtxt, repo_url, ai_text, webhook, color = sys.argv[1:9]
+name, branch, count, logtxt, repo_url, ai_text, webhook, color, title = sys.argv[1:10]
 
 header = {"template": color, "title": {"tag": "plain_text",
-          "content": f"🚀 commit 通知 | {name} @ {branch}"}}
+          "content": f"{title} | {name} @ {branch}"}}
 elements = [
     {"tag": "div", "text": {"tag": "lark_md",
         "content": f"**检测到 {count} 个新提交**\n" + logtxt}},
@@ -136,7 +162,7 @@ color_for() {  # $1=分组 $2=分支 → 飞书卡片标题颜色
   local grp="$1" b="$2"
   case "$b" in
     main|master)
-      case "$grp" in cpi) echo turquoise ;; h5) echo indigo ;; *) echo green ;; esac ;;
+      case "$grp" in cpi) echo turquoise ;; h5) echo indigo ;; td) echo carmine ;; *) echo green ;; esac ;;
     test)
       case "$grp" in cpi) echo purple ;; h5) echo orange ;; *) echo blue ;; esac ;;
     develop|dev|v2)
@@ -146,6 +172,19 @@ color_for() {  # $1=分组 $2=分支 → 飞书卡片标题颜色
   esac
 }
 
+run_ai() {  # $1=名称 $2=分支 $3=LOGTXT $4=DIFF $5=CONTEXT → stdout AI 文本，失败返回非0
+  local attempt AI_ERR="$CONFIG_DIR/.ai_err.tmp" AI_OUT=""
+  for attempt in $(seq 1 "$AI_MAX_ATTEMPTS"); do
+    if AI_OUT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$1" "$2" "$3" "$4" "$5" 2>"$AI_ERR"); then
+      rm -f "$AI_ERR"; echo "$AI_OUT"; return 0
+    fi
+    log "AI分析失败(第${attempt}次): $1/$2: $(tail -c 200 "$AI_ERR" 2>/dev/null)"
+    [ "$attempt" -lt "$AI_MAX_ATTEMPTS" ] && sleep "$AI_RETRY_SLEEP"
+  done
+  rm -f "$AI_ERR"
+  return 1
+}
+
 process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已 fetch，origin/$3 为最新）
   local name="$1" path="$2" branch="$3" group="$4"
   local NEW_SHA OLD_SHA STATE_FILE
@@ -153,42 +192,20 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
   STATE_FILE="$STATE_DIR/$name.${branch//\//__}.sha"
   OLD_SHA=$(cat "$STATE_FILE" 2>/dev/null)
   if [ -n "$OLD_SHA" ] && [ "$OLD_SHA" != "$NEW_SHA" ]; then
-    local COUNT REPO_URL LOGTXT DIFF AI_TEXT AI_ERR CONTEXT attempt
-    COUNT=$(git -C "$path" rev-list --count "$OLD_SHA..$NEW_SHA" 2>/dev/null || echo "?")
-    REPO_URL=$(git -C "$path" remote get-url origin 2>/dev/null \
-      | sed -e 's#git@github.com:#https://github.com/#' -e 's#\.git$##')
-    LOGTXT=$(git -C "$path" log --date=format:'%Y-%m-%d %H:%M' \
-      --format="- [%h](${REPO_URL}/commit/%H) %an · %ad: %s" \
-      "$OLD_SHA..$NEW_SHA" 2>/dev/null | head -20)
-    # 按提交拆分 diff，便于 AI 逐条归因
-    DIFF=""
-    local csha CSUBJ
-    while read -r csha; do
-      [ -z "$csha" ] && continue
-      CSUBJ=$(git -C "$path" log -1 --format='%s' "$csha" 2>/dev/null)
-      DIFF="${DIFF}--- 提交 ${csha:0:7}: ${CSUBJ}"$'\n'
-      DIFF="${DIFF}$(git -C "$path" show "$csha" --format="" 2>/dev/null \
-        | grep -vE '^(\+\+\+|---|index |diff --git )' | head -c 3000)"$'\n'
-    done < <(git -C "$path" rev-list --reverse "$OLD_SHA..$NEW_SHA" 2>/dev/null | head -10)
-    DIFF=$(printf '%s' "$DIFF" | head -c 8000)
+    gen_materials "$path" "$OLD_SHA" "$NEW_SHA"
+    local AI_TEXT="" CONTEXT
+    CONTEXT=$(ai_context "$name" "$group")
     if [ -n "$AI_TOKEN" ]; then
-      AI_ERR="$CONFIG_DIR/.ai_err.tmp"
-      AI_TEXT=""
-      CONTEXT=$(ai_context "$name" "$group")
-      for attempt in 1 2 3; do
-        if AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$LOGTXT" "$DIFF" "$CONTEXT" 2>"$AI_ERR"); then
-          break
-        fi
-        log "AI分析失败(第${attempt}次): $name/$branch: $(tail -c 200 "$AI_ERR" 2>/dev/null)"
-        AI_TEXT=""
-        [ $attempt -lt 3 ] && sleep 5
-      done
-      rm -f "$AI_ERR"
-    else
-      AI_TEXT=""
+      AI_TEXT=$(run_ai "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT")
+      if [ -z "$AI_TEXT" ]; then
+        # AI 失败：进入补发队列（下次轮询自动重试分析并补发卡片）
+        echo "$name|$path|$branch|$group|$OLD_SHA|$NEW_SHA|$(date +%s)" >> "$PENDING_FILE"
+        log "已加入AI补发队列: $name/$branch"
+      fi
     fi
-    if notify "$name" "$branch" "$COUNT" "$LOGTXT" "$REPO_URL" "$AI_TEXT" "$WEBHOOK" "$(color_for "$group" "$branch")"; then
-      log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
+    if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
+        "$(color_for "$group" "$branch")" "🚀 commit 通知"; then
+      log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($G_COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
       echo "$NEW_SHA" > "$STATE_FILE"
     else
       log "通知发送失败: $name/$branch（下次重试）"
@@ -196,6 +213,35 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
   else
     [ -z "$OLD_SHA" ] && { echo "$NEW_SHA" > "$STATE_FILE"; log "基线: $name/$branch = ${NEW_SHA:0:8}"; }
   fi
+}
+
+process_pending() {  # 补发队列：重试 AI，成功则补发分析卡片（标题含 commit 关键词以过机器人安全校验）
+  [ -f "$PENDING_FILE" ] || return 0
+  local keep="" line now=$(date +%s)
+  while IFS='|' read -r name path branch group oldsha newsha ts; do
+    case "$name" in ''|\#*) continue ;; esac
+    local age=$(( now - ts ))
+    if [ "$age" -gt "$PENDING_MAX_AGE" ]; then
+      log "AI补发放弃(超过24h): $name/$branch"
+      continue
+    fi
+    gen_materials "$path" "$oldsha" "$newsha"
+    local CONTEXT AI_TEXT
+    CONTEXT=$(ai_context "$name" "$group")
+    AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" 2>/dev/null)
+    if [ -n "$AI_TEXT" ]; then
+      if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
+          "$(color_for "$group" "$branch")" "🤖 commit AI 分析补发"; then
+        log "AI补发成功: $name/$branch ($oldsha..$newsha)"
+        continue   # 成功：不保留该行
+      fi
+      log "AI补发卡片发送失败: $name/$branch"
+    else
+      log "AI补发仍失败: $name/$branch（继续排队）"
+    fi
+    keep="${keep}${name}|${path}|${branch}|${group}|${oldsha}|${newsha}|${ts}"$'\n'
+  done < "$PENDING_FILE"
+  printf '%s' "$keep" > "$PENDING_FILE"
 }
 
 process_repo() {  # $1=名称 $2=路径 $3=分支(*=动态全部) $4=分组
@@ -226,6 +272,8 @@ process_repo() {  # $1=名称 $2=路径 $3=分支(*=动态全部) $4=分组
     fi
   done
 }
+
+process_pending   # 先处理上一轮 AI 失败的补发队列
 
 while IFS='|' read -r name path branch group; do
   case "$name" in ''|\#*) continue ;; esac
