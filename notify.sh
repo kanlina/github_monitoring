@@ -180,8 +180,8 @@ sys.exit(0 if body.get("code") == 0 or body.get("StatusCode") == 0 else 1)
 PY
 }
 
-record_violations() {  # $1=名称 $2=分支 $3=中文违规清单 → 记录未恢复违规（按 名称+分支+文件+内容 去重）
-  local name="$1" branch="$2" item file line content rest
+record_violations() {  # $1=名称 $2=分支 $3=中文违规清单 $4=检测时基线SHA → 记录未恢复违规
+  local name="$1" branch="$2" item file line content rest sha_="$4"
   [ -n "$3" ] || return 0
   while IFS= read -r item; do
     [ -z "$item" ] && continue
@@ -195,28 +195,59 @@ record_violations() {  # $1=名称 $2=分支 $3=中文违规清单 → 记录未
     if [ -f "$VIOL_FILE" ] && grep -qF "$name|$branch|$file|$content|" "$VIOL_FILE" 2>/dev/null; then
       continue
     fi
-    echo "$name|$branch|$file|$content|$(date +%s)" >> "$VIOL_FILE"
-    log "记录违规: $name/$branch $file:$line"
+    echo "$name|$branch|$file|$content|$sha_|$(date +%s)" >> "$VIOL_FILE"
+    log "记录违规: $name/$branch $file:$line (base=$sha_)"
   done <<< "$3"
 }
 
-check_resolutions() {  # $1=名称 $2=路径 $3=分支 → 检查未恢复违规是否已在最新代码中消失
-  local name="$1" path="$2" branch="$3"
+find_fix_commit() {  # $1=路径 $2=分支 $3=检测基线SHA $4=新SHA $5=内容 $6=文件 → 输出 "完整SHA 短SHA"
+  python3 - "$@" <<'PY'
+import subprocess, sys
+path, branch, base, new, content, file = sys.argv[1:7]
+def pickaxe(rng):
+    out = subprocess.run(
+        ["git", "-C", path, "log", rng, "--format=%H %h", "-S", content, "--", file],
+        capture_output=True, text=True)
+    return [l for l in out.stdout.strip().splitlines() if l]
+# 优先在“检测基线 → 最新”区间找移除该内容的提交
+lines = pickaxe(f"{base}..{new}") if base and base != new else []
+if not lines:  # 兜底：该分支全历史中最近一次增删该内容的提交
+    lines = pickaxe("origin/" + branch)
+if lines:
+    full, short = lines[0].split()
+    print(full, short)
+PY
+}
+
+check_resolutions() {  # $1=名称 $2=路径 $3=分支 $4=新SHA → 检查未恢复违规是否已消失，并定位修复提交
+  local name="$1" path="$2" branch="$3" new_sha="$4"
   [ -f "$VIOL_FILE" ] || return 0
   RESOLVED_LIST=""; RESOLVED_COUNT=0
-  local keep="" line name_ branch_ file_ content_ ts
-  while IFS='|' read -r name_ branch_ file_ content_ ts; do
+  local REPO_URL
+  REPO_URL=$(git -C "$path" remote get-url origin 2>/dev/null \
+    | sed -e 's#git@github.com:#https://github.com/#' -e 's#\.git$##')
+  local keep="" line name_ branch_ file_ content_ base_ ts fix_line full short
+  while IFS='|' read -r name_ branch_ file_ content_ base_ ts; do
     case "$name_" in ''|\#*) continue ;; esac
     if [ "$name_" = "$name" ] && [ "$branch_" = "$branch" ]; then
       if git -C "$path" grep -qF -- "$content_" "origin/$branch" -- "$file_" 2>/dev/null; then
-        keep="${keep}${name_}|${branch_}|${file_}|${content_}|${ts}"$'\n'   # 内容仍在 → 未恢复
+        keep="${keep}${name_}|${branch_}|${file_}|${content_}|${base_}|${ts}"$'\n'   # 内容仍在 → 未恢复
       else
+        full=""; short=""
+        fix_line=$(find_fix_commit "$path" "$branch" "$base_" "$new_sha" "$content_" "$file_") || true
+        if [ -n "$fix_line" ]; then
+          full=$(echo "$fix_line" | awk '{print $1}'); short=$(echo "$fix_line" | awk '{print $2}')
+        fi
         RESOLVED_COUNT=$((RESOLVED_COUNT+1))
-        RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}"$'\n'
-        log "违规已修复: $name/$branch $file_（原: $content_）"
+        if [ -n "$short" ]; then
+          RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}（修复提交: [$short](${REPO_URL}/commit/${full})）"$'\n'
+        else
+          RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}（修复提交未定位到）"$'\n'
+        fi
+        log "违规已修复: $name/$branch $file_（原: $content_）修复提交: ${short:-未知}"
       fi
     else
-      keep="${keep}${name_}|${branch_}|${file_}|${content_}|${ts}"$'\n'
+      keep="${keep}${name_}|${branch_}|${file_}|${content_}|${base_}|${ts}"$'\n'
     fi
   done < "$VIOL_FILE"
   printf '%s' "$keep" > "$VIOL_FILE"
@@ -273,8 +304,8 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
     fi
     # 违规闭环：记录新违规 + 检测既有违规是否已在最新代码中消失
     RESOLVED_LIST=""; RESOLVED_COUNT=0
-    record_violations "$name" "$branch" "$G_CJK"
-    check_resolutions "$name" "$path" "$branch"
+    record_violations "$name" "$branch" "$G_CJK" "$NEW_SHA"
+    check_resolutions "$name" "$path" "$branch" "$NEW_SHA"
     local COLOR
     COLOR=$(color_for "$group" "$branch")
     # 规范拦截触发（脚本扫到中文 或 AI 发现姓名违规）时，卡片标题标红
