@@ -92,14 +92,13 @@ ai_context() {  # $1=当前仓库名 $2=分组 → 输出同组其他项目近�
   done < "$REPOS_FILE"
 }
 
-ai_analyze() {  # $1=仓库名 $2=分支 $3=commit列表 $4=diff $5=关联项目近期提交 $6=中文违规精确清单  → stdout 摘要
+ai_analyze() {  # $1=仓库名 $2=分支 $3=commit列表 $4=diff $5=关联项目近期提交  → stdout 摘要
   [ -z "$AI_TOKEN" ] && return 1
   python3 - "$@" <<'PY'
 import json, sys, urllib.request
-name, branch, logtxt, diff, ctx, cjk = sys.argv[1:7]
+name, branch, logtxt, diff, ctx = sys.argv[1:6]
 diff = diff[:8000]
 ctx = ctx[:3000]
-cjk = cjk[:3000]
 prompt = f"""仓库 {name} 的 {branch} 分支有新提交。
 
 提交记录:
@@ -110,16 +109,13 @@ prompt = f"""仓库 {name} 的 {branch} 分支有新提交。
 {diff}
 ```
 
-中文内容精确定位清单（脚本扫描，格式 文件:行号 内容）:
-{cjk or "（无）"}
-
 同一产品的关联项目近期提交动态（供参考，用于识别跨端配合/依赖关系）:
 {ctx or "（无）"}
 
 请按 instructions 中的格式输出分析，不要输出其他内容。"""
 data = {
     "model": "gpt-5.5",
-    "instructions": "你是资深工程师兼产品顾问。输入包含按提交拆分的变更说明、diff、中文内容精确定位清单，以及同一产品其他端项目的近期提交动态。用简体中文做分析，550 字以内，按以下四段输出（段落标题用【】，不要使用 markdown 标题）:\n【技术实现】逐条提交说明：每条提交一行，直接讲技术实现——改动的关键类/组件/接口/字段/配置项，以及逻辑如何变化，不写产品目的\n【对用户的影响】普通用户会感知到什么变化？哪些操作流程会不一样？对业务指标（如注册转化、放款、还款）可能有什么影响\n【风险与建议】技术风险（如边界条件、兼容性、数据一致性）+ 建议重点回归的具体场景。若本批提交与关联项目近期提交是同一需求的跨端配合（如客户端与后端联动改造），请明确指出配合关系及上线顺序依赖（哪端先上/需同时上）\n【规范拦截】中文违规以「中文内容精确定位清单」为准，逐条指出文件、行号、中文内容，不得遗漏或杜撰；清单为空时仍需检查 diff 与提交信息中是否出现开发人员姓名/拼音写死在代码中的情况（如有，指出文件与内容）；两者都不存在才输出「未发现违规项」",
+    "instructions": "你是资深工程师兼产品顾问。输入包含按提交拆分的变更说明、diff，以及同一产品其他端项目的近期提交动态。用简体中文做分析，550 字以内，按以下四段输出（段落标题用【】，不要使用 markdown 标题）:\n【技术实现】逐条提交说明：每条提交一行，直接讲技术实现——改动的关键类/组件/接口/字段/配置项，以及逻辑如何变化，不写产品目的\n【对用户的影响】普通用户会感知到什么变化？哪些操作流程会不一样？对业务指标（如注册转化、放款、还款）可能有什么影响\n【风险与建议】技术风险（如边界条件、兼容性、数据一致性）+ 建议重点回归的具体场景。若本批提交与关联项目近期提交是同一需求的跨端配合（如客户端与后端联动改造），请明确指出配合关系及上线顺序依赖（哪端先上/需同时上）\n【规范拦截】只负责检查 diff 与提交信息中是否出现开发人员姓名/拼音标识写死在代码中的情况（如 godwish、zhangpu、kanlina 等被写进代码），如有则指出文件与内容；中文字符违规由脚本另行精确标注，你无需负责。姓名类也未发现时，输出「未发现违规项」",
     "input": prompt,
     "max_output_tokens": 1600,
 }
@@ -221,19 +217,23 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
     local AI_TEXT="" CONTEXT
     CONTEXT=$(ai_context "$name" "$group")
     if [ -n "$AI_TOKEN" ]; then
-      AI_TEXT=$(run_ai "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" "$G_CJK")
+      AI_TEXT=$(run_ai "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT")
       if [ -z "$AI_TEXT" ]; then
         # AI 失败：进入补发队列（下次轮询自动重试分析并补发卡片）
         echo "$name|$path|$branch|$group|$OLD_SHA|$NEW_SHA|$(date +%s)" >> "$PENDING_FILE"
         log "已加入AI补发队列: $name/$branch"
       fi
     fi
+    # 中文违规由脚本确定性拼入卡片，不依赖 AI 转述（保证 文件:行号:内容 必现）
+    if [ -n "$G_CJK" ]; then
+      AI_TEXT="${AI_TEXT}${AI_TEXT:+$'\n\n'}【规范拦截】中文字符违规（脚本精确定位）："$'\n'"$G_CJK"
+    fi
     local COLOR
     COLOR=$(color_for "$group" "$branch")
-    # AI 分析触发规范拦截（存在违规项）时，卡片标题标红
-    if [ -n "$AI_TEXT" ] \
-       && printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
-       && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; then
+    # 规范拦截触发（脚本扫到中文 或 AI 发现姓名违规）时，卡片标题标红
+    if [ -n "$G_CJK" ] \
+       || { [ -n "$AI_TEXT" ] && printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
+            && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; }; then
       COLOR=red
       log "规范拦截触发: $name/$branch"
     fi
@@ -262,12 +262,16 @@ process_pending() {  # 补发队列：重试 AI，成功则补发分析卡片（
     gen_materials "$path" "$oldsha" "$newsha"
     local CONTEXT AI_TEXT
     CONTEXT=$(ai_context "$name" "$group")
-    AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" "$G_CJK" 2>/dev/null)
+    AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" 2>/dev/null)
     if [ -n "$AI_TEXT" ]; then
+      if [ -n "$G_CJK" ]; then
+        AI_TEXT="${AI_TEXT}${AI_TEXT:+$'\n\n'}【规范拦截】中文字符违规（脚本精确定位）："$'\n'"$G_CJK"
+      fi
       local COLOR
       COLOR=$(color_for "$group" "$branch")
-      if printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
-         && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; then
+      if [ -n "$G_CJK" ] \
+         || { printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
+              && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; }; then
         COLOR=red
       fi
       if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
