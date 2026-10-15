@@ -10,6 +10,20 @@ echo "==> 拉取最新代码"
 git pull --ff-only origin main
 
 echo "==> 部署 notify.sh"
+# 部署前校验：bash 语法 + 内嵌 PY heredoc 的 Python 语法
+bash -n notify.sh || { echo "❌ bash 语法错误，停止部署"; exit 1; }
+python3 - <<'PYCHECK'
+import ast, sys
+src = open("notify.sh", encoding="utf-8").read()
+parts = src.split("<<'PY'")[1:]
+for i, p in enumerate(parts):
+    code = "\n".join(p.split("\nPY\n")[0].split("\n")[1:])
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        print(f"❌ 内嵌 PY 块{i+1} 语法错误 line {e.lineno}: {e.msg}"); sys.exit(1)
+print("    notify.sh 语法校验通过（bash + 内嵌 Python）")
+PYCHECK
 cp notify.sh "$CONFIG_DIR/notify.sh"
 chmod +x "$CONFIG_DIR/notify.sh"
 
