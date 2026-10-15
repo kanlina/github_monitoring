@@ -16,6 +16,7 @@ WEBHOOK_FILE="$CONFIG_DIR/webhook.txt"
 AI_KEY_FILE="$CONFIG_DIR/ai_key.txt"
 STATE_DIR="$CONFIG_DIR/state"
 PENDING_FILE="$CONFIG_DIR/pending.list"
+VIOL_FILE="$CONFIG_DIR/violations.list"   # 未恢复违规记录: 名称|分支|文件|内容|时间戳
 LOG_FILE="$CONFIG_DIR/notify.log"
 AI_MAX_ATTEMPTS=3
 AI_RETRY_SLEEP=5
@@ -179,6 +180,48 @@ sys.exit(0 if body.get("code") == 0 or body.get("StatusCode") == 0 else 1)
 PY
 }
 
+record_violations() {  # $1=名称 $2=分支 $3=中文违规清单 → 记录未恢复违规（按 名称+分支+文件+内容 去重）
+  local name="$1" branch="$2" item file line content rest
+  [ -n "$3" ] || return 0
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    item="${item#- }"
+    file="${item%%:*}"
+    rest="${item#*:}"
+    line="${rest%% *}"
+    content="${rest#* }"
+    content="${content//|/／}"
+    [ -z "$content" ] && continue
+    if [ -f "$VIOL_FILE" ] && grep -qF "$name|$branch|$file|$content|" "$VIOL_FILE" 2>/dev/null; then
+      continue
+    fi
+    echo "$name|$branch|$file|$content|$(date +%s)" >> "$VIOL_FILE"
+    log "记录违规: $name/$branch $file:$line"
+  done <<< "$3"
+}
+
+check_resolutions() {  # $1=名称 $2=路径 $3=分支 → 检查未恢复违规是否已在最新代码中消失
+  local name="$1" path="$2" branch="$3"
+  [ -f "$VIOL_FILE" ] || return 0
+  RESOLVED_LIST=""; RESOLVED_COUNT=0
+  local keep="" line name_ branch_ file_ content_ ts
+  while IFS='|' read -r name_ branch_ file_ content_ ts; do
+    case "$name_" in ''|\#*) continue ;; esac
+    if [ "$name_" = "$name" ] && [ "$branch_" = "$branch" ]; then
+      if git -C "$path" grep -qF -- "$content_" "origin/$branch" -- "$file_" 2>/dev/null; then
+        keep="${keep}${name_}|${branch_}|${file_}|${content_}|${ts}"$'\n'   # 内容仍在 → 未恢复
+      else
+        RESOLVED_COUNT=$((RESOLVED_COUNT+1))
+        RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}"$'\n'
+        log "违规已修复: $name/$branch $file_（原: $content_）"
+      fi
+    else
+      keep="${keep}${name_}|${branch_}|${file_}|${content_}|${ts}"$'\n'
+    fi
+  done < "$VIOL_FILE"
+  printf '%s' "$keep" > "$VIOL_FILE"
+}
+
 color_for() {  # $1=分组 $2=分支 → 飞书卡片标题颜色
   local grp="$1" b="$2"
   case "$b" in
@@ -228,6 +271,10 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
     if [ -n "$G_CJK" ]; then
       AI_TEXT="${AI_TEXT}${AI_TEXT:+$'\n\n'}【规范拦截】中文字符违规（脚本精确定位）："$'\n'"$G_CJK"
     fi
+    # 违规闭环：记录新违规 + 检测既有违规是否已在最新代码中消失
+    RESOLVED_LIST=""; RESOLVED_COUNT=0
+    record_violations "$name" "$branch" "$G_CJK"
+    check_resolutions "$name" "$path" "$branch"
     local COLOR
     COLOR=$(color_for "$group" "$branch")
     # 规范拦截触发（脚本扫到中文 或 AI 发现姓名违规）时，卡片标题标红
@@ -243,6 +290,13 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
       echo "$NEW_SHA" > "$STATE_FILE"
     else
       log "通知发送失败: $name/$branch（下次重试）"
+    fi
+    # 违规恢复确认卡
+    if [ "$RESOLVED_COUNT" -gt 0 ]; then
+      if notify "$name" "$branch" "$RESOLVED_COUNT" "$RESOLVED_LIST" "$G_REPO_URL" "" "$WEBHOOK" \
+          green "✅ commit 规范违规已修复"; then
+        log "违规恢复通知: $name/$branch ($RESOLVED_COUNT 项)"
+      fi
     fi
   else
     [ -z "$OLD_SHA" ] && { echo "$NEW_SHA" > "$STATE_FILE"; log "基线: $name/$branch = ${NEW_SHA:0:8}"; }
@@ -313,6 +367,10 @@ process_repo() {  # $1=名称 $2=路径 $3=分支(*=动态全部) $4=分组
     if ! echo "$branches" | grep -qxF "$fb"; then
       rm -f "$f"
       log "分支已删除，清理基线: $name/$fb"
+      if [ -f "$VIOL_FILE" ] && grep -qF "$name|$fb|" "$VIOL_FILE" 2>/dev/null; then
+        grep -vF "$name|$fb|" "$VIOL_FILE" > "$VIOL_FILE.tmp" && mv "$VIOL_FILE.tmp" "$VIOL_FILE"
+        log "分支已删除，清理违规记录: $name/$fb"
+      fi
     fi
   done
 }
