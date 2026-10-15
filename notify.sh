@@ -147,17 +147,18 @@ except Exception as e:
 PY
 }
 
-notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本 $7=webhook $8=颜色 $9=标题前缀
+notify() {  # $1=repo名 $2=分支 $3=提交数 $4=commit markdown $5=仓库URL $6=AI分析文本 $7=webhook $8=颜色 $9=标题前缀 $10=统计行文案(可选)
   python3 - "$@" <<'PY'
 import json, sys, urllib.request
 from datetime import datetime
 name, branch, count, logtxt, repo_url, ai_text, webhook, color, title = sys.argv[1:10]
+count_label = sys.argv[10] if len(sys.argv) > 10 else f"检测到 {count} 个新提交"
 
 header = {"template": color, "title": {"tag": "plain_text",
           "content": f"{title} | {name} @ {branch}"}}
 elements = [
     {"tag": "div", "text": {"tag": "lark_md",
-        "content": f"**检测到 {count} 个新提交**\n" + logtxt}},
+        "content": f"**{count_label}**\n" + logtxt}},
 ]
 if ai_text:
     elements.append({"tag": "div", "text": {"tag": "lark_md",
@@ -219,7 +220,16 @@ if lines:
 PY
 }
 
-check_resolutions() {  # $1=名称 $2=路径 $3=分支 $4=新SHA → 检查未恢复违规是否已消失，并定位修复提交
+record_ai_violation() {  # $1=名称 $2=分支 $3=提交SHA → 记录 AI 判定的违规（无精确文件行号，按 名称+分支 去重）
+  local name="$1" branch="$2" sha="$3"
+  if [ -f "$VIOL_FILE" ] && grep -qF "$name|$branch|（AI 综合判定）|" "$VIOL_FILE" 2>/dev/null; then
+    return 0
+  fi
+  echo "$name|$branch|（AI 综合判定）|（姓名/拼音违规，详见红卡 AI 分析）|$sha|$(date +%s)" >> "$VIOL_FILE"
+  log "记录违规(AI判定): $name/$branch"
+}
+
+check_resolutions() {  # $1=名称 $2=路径 $3=分支 $4=新SHA $5=本轮是否有违规(0/1) → 检查未恢复违规是否已消失，并定位修复提交
   local name="$1" path="$2" branch="$3" new_sha="$4"
   [ -f "$VIOL_FILE" ] || return 0
   RESOLVED_LIST=""; RESOLVED_COUNT=0
@@ -230,7 +240,16 @@ check_resolutions() {  # $1=名称 $2=路径 $3=分支 $4=新SHA → 检查未�
   while IFS='|' read -r name_ branch_ file_ content_ base_ ts; do
     case "$name_" in ''|\#*) continue ;; esac
     if [ "$name_" = "$name" ] && [ "$branch_" = "$branch" ]; then
-      if git -C "$path" grep -qF -- "$content_" "origin/$branch" -- "$file_" 2>/dev/null; then
+      if [ "$file_" = "（AI 综合判定）" ]; then
+        # AI 综合判定条目：本批已无违规 → 判定已修复（修复提交=本批最新提交）
+        if [ "$has_violation" = "0" ]; then
+          RESOLVED_COUNT=$((RESOLVED_COUNT+1))
+          RESOLVED_LIST="${RESOLVED_LIST}- （AI 综合判定）—— 姓名/拼音违规已修复（修复提交: [$new_sha](${REPO_URL}/commit/${new_sha})）"$'\n'
+          log "违规已修复(AI判定): $name/$branch 修复提交: $new_sha"
+        else
+          keep="${keep}${name_}|${branch_}|${file_}|${content_}|${base_}|${ts}"$'\n'
+        fi
+      elif git -C "$path" grep -qF -- "$content_" "origin/$branch" -- "$file_" 2>/dev/null; then
         keep="${keep}${name_}|${branch_}|${file_}|${content_}|${base_}|${ts}"$'\n'   # 内容仍在 → 未恢复
       else
         full=""; short=""
@@ -240,7 +259,7 @@ check_resolutions() {  # $1=名称 $2=路径 $3=分支 $4=新SHA → 检查未�
         fi
         RESOLVED_COUNT=$((RESOLVED_COUNT+1))
         if [ -n "$short" ]; then
-          RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}（修复提交: [$short](${REPO_URL}/commit/${full})）"$'\n'
+          RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}（违规来源: [${base_:0:8}](${REPO_URL}/commit/${base_}) ｜ 修复提交: [$short](${REPO_URL}/commit/${full})）"$'\n'
         else
           RESOLVED_LIST="${RESOLVED_LIST}- ${file_} —— 已移除：${content_}（修复提交未定位到）"$'\n'
         fi
@@ -298,23 +317,25 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
         log "已加入AI补发队列: $name/$branch"
       fi
     fi
-    # 中文违规由脚本确定性拼入卡片，不依赖 AI 转述（保证 文件:行号:内容 必现）
+    # ---- 规范拦截判定（脚本中文扫描 + AI 姓名判定，任一命中即违规）----
+    HAS_VIOLATION=0
+    if [ -n "$G_CJK" ]; then HAS_VIOLATION=1; fi
+    if [ -n "$AI_TEXT" ] && printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
+       && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; then
+      HAS_VIOLATION=1
+    fi
+    # 中文违规由脚本确定性拼入卡片（保证 文件:行号:内容 必现）
     if [ -n "$G_CJK" ]; then
       AI_TEXT="${AI_TEXT}${AI_TEXT:+$'\n\n'}【规范拦截】中文字符违规（脚本精确定位）："$'\n'"$G_CJK"
     fi
-    # 违规闭环：记录新违规 + 检测既有违规是否已在最新代码中消失
-    RESOLVED_LIST=""; RESOLVED_COUNT=0
+    # 违规闭环：记录新违规（CJK 精确条目；AI 判定且无 CJK 条目时记综合判定条目）
     record_violations "$name" "$branch" "$G_CJK" "$NEW_SHA"
-    check_resolutions "$name" "$path" "$branch" "$NEW_SHA"
+    if [ "$HAS_VIOLATION" -eq 1 ] && [ -z "$G_CJK" ]; then
+      record_ai_violation "$name" "$branch" "$NEW_SHA"
+    fi
     local COLOR
     COLOR=$(color_for "$group" "$branch")
-    # 规范拦截触发（脚本扫到中文 或 AI 发现姓名违规）时，卡片标题标红
-    if [ -n "$G_CJK" ] \
-       || { [ -n "$AI_TEXT" ] && printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
-            && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; }; then
-      COLOR=red
-      log "规范拦截触发: $name/$branch"
-    fi
+    [ "$HAS_VIOLATION" -eq 1 ] && { COLOR=red; log "规范拦截触发: $name/$branch"; }
     if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
         "$COLOR" "🚀 commit 通知"; then
       log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($G_COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
@@ -322,10 +343,12 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
     else
       log "通知发送失败: $name/$branch（下次重试）"
     fi
-    # 违规恢复确认卡
+    # 违规恢复检测：本批已无违规但存在未恢复记录 → 判定为已修复（修复提交=本批 SHA）
+    RESOLVED_LIST=""; RESOLVED_COUNT=0
+    check_resolutions "$name" "$path" "$branch" "$NEW_SHA" "$HAS_VIOLATION"
     if [ "$RESOLVED_COUNT" -gt 0 ]; then
       if notify "$name" "$branch" "$RESOLVED_COUNT" "$RESOLVED_LIST" "$G_REPO_URL" "" "$WEBHOOK" \
-          green "✅ commit 规范违规已修复"; then
+          green "✅ commit 规范违规已修复" "已修复 ${RESOLVED_COUNT} 项规范违规"; then
         log "违规恢复通知: $name/$branch ($RESOLVED_COUNT 项)"
       fi
     fi
