@@ -203,8 +203,17 @@ process_branch() {  # $1=名称 $2=路径 $3=分支 $4=分组 （调用前需已
         log "已加入AI补发队列: $name/$branch"
       fi
     fi
+    local COLOR
+    COLOR=$(color_for "$group" "$branch")
+    # AI 分析触发规范拦截（存在违规项）时，卡片标题标红
+    if [ -n "$AI_TEXT" ] \
+       && printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
+       && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; then
+      COLOR=red
+      log "规范拦截触发: $name/$branch"
+    fi
     if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
-        "$(color_for "$group" "$branch")" "🚀 commit 通知"; then
+        "$COLOR" "🚀 commit 通知"; then
       log "已通知: $name/$branch $OLD_SHA..$NEW_SHA ($G_COUNT commits) ai=$([ -n "$AI_TEXT" ] && echo yes || echo no)"
       echo "$NEW_SHA" > "$STATE_FILE"
     else
@@ -230,8 +239,14 @@ process_pending() {  # 补发队列：重试 AI，成功则补发分析卡片（
     CONTEXT=$(ai_context "$name" "$group")
     AI_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" 2>/dev/null)
     if [ -n "$AI_TEXT" ]; then
+      local COLOR
+      COLOR=$(color_for "$group" "$branch")
+      if printf '%s' "$AI_TEXT" | grep -q "【规范拦截】" \
+         && ! printf '%s' "$AI_TEXT" | grep -q "未发现违规项"; then
+        COLOR=red
+      fi
       if notify "$name" "$branch" "$G_COUNT" "$G_LOGTXT" "$G_REPO_URL" "$AI_TEXT" "$WEBHOOK" \
-          "$(color_for "$group" "$branch")" "🤖 commit AI 分析补发"; then
+          "$COLOR" "🤖 commit AI 分析补发"; then
         log "AI补发成功: $name/$branch ($oldsha..$newsha)"
         continue   # 成功：不保留该行
       fi
