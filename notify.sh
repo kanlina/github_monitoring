@@ -348,7 +348,7 @@ emit_card() {  # $1=名称 $2=路径 $3=分支 $4=分组 $5=OLD_SHA $6=NEW_SHA $
   if [ -n "$WEBHOOK_EN" ]; then
     local EN_TEXT=""
     if [ -n "$AI_TOKEN" ]; then
-      EN_TEXT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" en 2>/dev/null)
+      EN_TEXT=$(run_ai "$name" "$branch" "$G_LOGTXT" "$G_DIFF" "$CONTEXT" en)
     fi
     if [ -n "$G_CJK" ]; then
       EN_TEXT="${EN_TEXT}${EN_TEXT:+$'\n\n'}【Compliance】Chinese characters in new code (located by script):"$'\n'"$G_CJK"
