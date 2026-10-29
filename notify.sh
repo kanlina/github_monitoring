@@ -166,8 +166,9 @@ else:
     count_label = f"Detected {count} new commit(s)" if lang == "en" else f"检测到 {count} 个新提交"
 ai_label = "**🤖 AI Analysis**" if lang == "en" else "**🤖 AI 分析**"
 button_text = "View Code" if lang == "en" else "查看代码"
+wh_tag = webhook.rsplit("/", 1)[-1][:8]
 note_text = ("git-notify auto push · " if lang == "en" else "git-notify 自动推送 · ") \
-    + datetime.now().strftime('%Y-%m-%d %H:%M')
+    + wh_tag + " · " + datetime.now().strftime('%Y-%m-%d %H:%M')
 
 header = {"template": color, "title": {"tag": "plain_text",
           "content": f"{title} | {name} @ {branch}"}}
