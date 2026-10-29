@@ -302,10 +302,10 @@ color_for() {  # $1=分组 $2=分支 → 飞书卡片标题颜色
   esac
 }
 
-run_ai() {  # $1=名称 $2=分支 $3=LOGTXT $4=DIFF $5=CONTEXT $6=中文违规清单 → stdout AI 文本，失败返回非0
+run_ai() {  # $1=名称 $2=分支 $3=LOGTXT $4=DIFF $5=CONTEXT $6=语言(zh/en,默认zh) → stdout AI 文本，失败返回非0
   local attempt AI_ERR="$CONFIG_DIR/.ai_err.tmp" AI_OUT=""
   for attempt in $(seq 1 "$AI_MAX_ATTEMPTS"); do
-    if AI_OUT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$1" "$2" "$3" "$4" "$5" zh 2>"$AI_ERR"); then
+    if AI_OUT=$(AI_TOKEN="$AI_TOKEN" ai_analyze "$1" "$2" "$3" "$4" "$5" "${6:-zh}" 2>"$AI_ERR"); then
       rm -f "$AI_ERR"; echo "$AI_OUT"; return 0
     fi
     log "AI分析失败(第${attempt}次): $1/$2: $(tail -c 200 "$AI_ERR" 2>/dev/null)"
